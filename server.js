@@ -442,9 +442,9 @@ app.put('/api/admin/withdrawals/:id/process', authenticateToken, authorizeAdmin,
 app.use(express.static(__dirname));
 
 // Rota fallback para SPA
-app.get('*', (req, res) => {
-    res.sendFile(__dirname + '/index.html');
-});
+////app.get('*', (req, res) => {
+  //  res.sendFile(__dirname + '/index.html');
+//});
 
 app.listen(PORT, () => {
     console.log(`🚀 Servidor Taskin rodando em http://localhost:${PORT}`);
