@@ -283,6 +283,22 @@ app.post('/api/withdrawals', authenticateToken, async (req, res) => {
 // ROTAS DO PAINEL ADMIN
 // ========================
 
+// --- INÍCIO DA ALTERAÇÃO CRÍTICA ---
+// Obter TODAS as tarefas ativas (para o painel admin)
+app.get('/api/admin/tasks/active', authenticateToken, authorizeAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, title, summary, network, value, current_completions, max_completions, status FROM tasks WHERE status = $1 ORDER BY id DESC',
+            ['active']
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Erro ao buscar tarefas ativas:', error);
+        res.status(500).json({ error: 'Erro interno do servidor.' });
+    }
+});
+// --- FIM DA ALTERAÇÃO CRÍTICA ---
+
 // Obter tarefas pendentes de aprovação
 app.get('/api/admin/tasks/pending', authenticateToken, authorizeAdmin, async (req, res) => {
     try {
