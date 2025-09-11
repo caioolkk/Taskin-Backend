@@ -68,7 +68,7 @@ const authorizeAdmin = (req, res, next) => {
 // SCRIPT PARA CRIAR AS TABELAS AUTOMATICAMENTE
 // ===============================================
 const createTablesQuery = `
--- Tabela de Usuários (ALTERADA: Adicionada coluna referrer_email)
+-- Tabela de Usuários (ALTERADA: Adicionadas colunas is_verified, device_id e referrer_email)
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     verification_token VARCHAR(6),
     balance DECIMAL(10, 2) DEFAULT 0.00,
-    referrer_email VARCHAR(255), -- Nova coluna para armazenar o e-mail do indicador
+    referrer_email VARCHAR(255),
+    is_verified BOOLEAN DEFAULT FALSE,
+    device_id VARCHAR(255) UNIQUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -133,9 +135,9 @@ pool.query(createTablesQuery, (err, res) => {
 // FIM DO SCRIPT DE CRIAÇÃO AUTOMÁTICA
 // ===============================================
 
-// Rota de Registro de Usuário (ALTERADA)
+// Rota de Registro de Usuário (ALTERADA - Versão Final com Device ID)
 app.post('/api/register', async (req, res) => {
-    const { name, email, whatsapp, password, referrerEmail } = req.body;
+    const { name, email, whatsapp, password, referrerEmail, device_id } = req.body;
 
     if (!name || !email || !whatsapp || !password) {
         return res.status(400).json({ error: 'Todos os campos são obrigatórios.' });
@@ -147,16 +149,22 @@ app.post('/api/register', async (req, res) => {
             return res.status(409).json({ error: 'E-mail já cadastrado.' });
         }
 
+        // Verifica se o device_id já existe
+        if (device_id) {
+            const deviceCheck = await pool.query('SELECT id FROM users WHERE device_id = $1', [device_id]);
+            if (deviceCheck.rows.length > 0) {
+                return res.status(409).json({ error: 'Já existe uma conta cadastrada neste aparelho.' });
+            }
+        }
+
         const saltRounds = 10;
         const hashedPassword = await bcrypt.hash(password, saltRounds);
         const verificationToken = Math.floor(100000 + Math.random() * 900000).toString();
 
-        // --- ALTERAÇÃO: Insere o referrer_email no banco de dados ---
         const result = await pool.query(
-            'INSERT INTO users (name, email, whatsapp, password_hash, verification_token, referrer_email) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, whatsapp',
-            [name, email, whatsapp, hashedPassword, verificationToken, referrerEmail || null]
+            'INSERT INTO users (name, email, whatsapp, password_hash, verification_token, referrer_email, device_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, name, email, whatsapp',
+            [name, email, whatsapp, hashedPassword, verificationToken, referrerEmail || null, device_id || null]
         );
-        // --- FIM DA ALTERAÇÃO ---
 
         const newUser = result.rows[0];
 
@@ -178,7 +186,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// Rota de Login
+// Rota de Login (ALTERADA - Verifica is_verified)
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
 
@@ -194,6 +202,12 @@ app.post('/api/login', async (req, res) => {
         }
 
         const user = result.rows[0];
+
+        // Verifica se o e-mail foi verificado
+        if (!user.is_verified) {
+            return res.status(403).json({ error: 'E-mail não verificado. Por favor, confirme seu e-mail antes de fazer login.' });
+        }
+
         const isPasswordValid = await bcrypt.compare(password, user.password_hash);
 
         if (!isPasswordValid) {
@@ -212,6 +226,68 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ error: 'Erro interno do servidor.' });
     }
 });
+
+// --- INÍCIO DA NOVA ROTA: Verificar Device ID ---
+app.post('/api/check-device', async (req, res) => {
+    const { device_id } = req.body;
+
+    if (!device_id) {
+        return res.status(400).json({ error: 'ID do dispositivo é obrigatório.' });
+    }
+
+    try {
+        const result = await pool.query('SELECT id FROM users WHERE device_id = $1', [device_id]);
+
+        res.json({ exists: result.rows.length > 0 });
+    } catch (error) {
+        console.error('Erro ao verificar device ID:', error);
+        res.status(500).json({ error: 'Erro interno do servidor.' });
+    }
+});
+// --- FIM DA NOVA ROTA ---
+
+// --- INÍCIO DA NOVA ROTA: Verificar E-mail ---
+app.post('/api/verify-email', async (req, res) => {
+    const { email, token } = req.body;
+
+    if (!email || !token) {
+        return res.status(400).json({ error: 'E-mail e token são obrigatórios.' });
+    }
+
+    try {
+        const result = await pool.query(
+            'SELECT id, verification_token, created_at FROM users WHERE email = $1',
+            [email]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Usuário não encontrado.' });
+        }
+
+        const user = result.rows[0];
+
+        // Verifica se o token corresponde
+        if (user.verification_token !== token) {
+            return res.status(400).json({ error: 'Token inválido.' });
+        }
+
+        // Verifica se o token expirou (1 hora)
+        const tokenAge = new Date() - new Date(user.created_at);
+        const oneHourInMs = 60 * 60 * 1000;
+        if (tokenAge > oneHourInMs) {
+            return res.status(400).json({ error: 'Token expirado. Solicite um novo.' });
+        }
+
+        // Atualiza o status do usuário para verificado
+        await pool.query('UPDATE users SET is_verified = TRUE, verification_token = NULL WHERE id = $1', [user.id]);
+
+        res.json({ message: 'E-mail verificado com sucesso! Você já pode fazer login.' });
+    } catch (error) {
+        console.error('Erro na verificação de e-mail:', error);
+        res.status(500).json({ error: 'Erro interno do servidor.' });
+    }
+});
+// --- FIM DA NOVA ROTA ---
 
 // Rota para obter a PRÓXIMA tarefa disponível (UMA POR VEZ)
 app.get('/api/tasks/next', authenticateToken, async (req, res) => {
@@ -292,7 +368,7 @@ app.post('/api/tasks/submit-proof', authenticateToken, async (req, res) => {
     }
 });
 
-// --- INÍCIO DA NOVA ROTA: Notificar Indicador ---
+// --- INÍCIO DA ROTA ALTERADA: Notificar Indicador ---
 // Rota para notificar o indicador que o indicado completou uma tarefa
 app.post('/api/tasks/notify-referrer', authenticateToken, async (req, res) => {
     const { taskId } = req.body;
@@ -313,8 +389,16 @@ app.post('/api/tasks/notify-referrer', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Tarefa não encontrada ou não aprovada.' });
         }
 
-        // Busca o e-mail do indicador
-        const user = await pool.query('SELECT referrer_email FROM users WHERE id = $1', [userId]);
+        // Busca o e-mail do indicador e verifica se o usuário indicado está em conformidade
+        const user = await pool.query('SELECT referrer_email, is_verified, device_id FROM users WHERE id = $1', [userId]);
+
+        if (!user.rows[0].is_verified) {
+            return res.status(403).json({ error: 'O usuário indicado precisa ter o e-mail verificado para liberar o bônus.' });
+        }
+
+        if (!user.rows[0].device_id) {
+            return res.status(403).json({ error: 'O usuário indicado precisa ter um device_id válido para liberar o bônus.' });
+        }
 
         if (!user.rows[0].referrer_email) {
             return res.status(200).json({ message: 'Nenhum indicador encontrado.' });
@@ -343,7 +427,7 @@ app.post('/api/tasks/notify-referrer', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Erro interno do servidor.' });
     }
 });
-// --- FIM DA NOVA ROTA ---
+// --- FIM DA ROTA ALTERADA ---
 
 // Rota para obter histórico de tarefas do usuário
 app.get('/api/tasks/history', authenticateToken, async (req, res) => {
@@ -479,16 +563,13 @@ app.put('/api/admin/tasks/:id/approve', authenticateToken, authorizeAdmin, async
             [value, user_id]
         );
 
-        // --- INÍCIO DA ALTERAÇÃO: Notifica o indicador ---
         // Chama a rota internamente para creditar o bônus ao indicador
-        // Em um sistema real, isso seria feito via uma função interna, mas para simplificar, estamos fazendo uma chamada HTTP.
-        // Isso é apenas para fins de demonstração. Em produção, você deve extrair essa lógica para uma função separada.
         try {
             const notifyResponse = await fetch(`${process.env.BASE_URL || 'http://localhost:3000'}/api/tasks/notify-referrer`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': req.headers['authorization'] // Reutiliza o token do admin
+                    'Authorization': req.headers['authorization']
                 },
                 body: JSON.stringify({ taskId: id })
             });
@@ -501,7 +582,6 @@ app.put('/api/admin/tasks/:id/approve', authenticateToken, authorizeAdmin, async
         } catch (notifyError) {
             console.warn('Erro ao chamar rota de notificação:', notifyError.message);
         }
-        // --- FIM DA ALTERAÇÃO ---
 
         res.json({ message: 'Tarefa aprovada e saldo creditado com sucesso.' });
     } catch (error) {
