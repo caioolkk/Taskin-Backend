@@ -23,14 +23,82 @@ const pool = new Pool({
     }
 });
 
-// Testar conexão com o banco
+// ===============================================
+// SCRIPT PARA CRIAR AS TABELAS AUTOMATICAMENTE
+// ===============================================
+const createTablesQuery = `
+-- Tabela de Usuários
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    whatsapp VARCHAR(20) NOT NULL,
+    password_hash TEXT NOT NULL,
+    verification_token VARCHAR(6),
+    balance DECIMAL(10, 2) DEFAULT 0.00,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabela de Tarefas
+CREATE TABLE IF NOT EXISTS tasks (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    summary TEXT NOT NULL,
+    details TEXT NOT NULL,
+    link TEXT NOT NULL,
+    network VARCHAR(100) NOT NULL,
+    value DECIMAL(10, 2) NOT NULL,
+    max_completions INTEGER NOT NULL,
+    current_completions INTEGER DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'completed')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabela de Relacionamento Usuário-Tarefas
+CREATE TABLE IF NOT EXISTS user_tasks (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'submitted', 'approved', 'rejected')),
+    proof_link TEXT,
+    submitted_at TIMESTAMP,
+    approved_at TIMESTAMP,
+    rejected_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabela de Saques
+CREATE TABLE IF NOT EXISTS withdrawals (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    amount DECIMAL(10, 2) NOT NULL,
+    pix_key TEXT NOT NULL,
+    status VARCHAR(20) DEFAULT 'Pendente' CHECK (status IN ('Pendente', 'Pago', 'Recusado')),
+    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP
+);
+`;
+
+// Testar conexão e criar tabelas
 pool.query('SELECT NOW()', (err, res) => {
     if (err) {
         console.error('❌ Erro ao conectar ao banco de dados:', err.stack);
     } else {
         console.log('✅ Conexão com PostgreSQL estabelecida com sucesso.');
+
+        // Executa o script de criação de tabelas
+        pool.query(createTablesQuery, (err, res) => {
+            if (err) {
+                console.error('❌ Erro ao criar tabelas:', err.stack);
+            } else {
+                console.log('✅ Tabelas criadas com sucesso (ou já existiam).');
+            }
+        });
     }
 });
+// ===============================================
+// FIM DO SCRIPT DE CRIAÇÃO AUTOMÁTICA
+// ===============================================
 
 // Configuração do Nodemailer
 const transporter = nodemailer.createTransport({
@@ -283,7 +351,6 @@ app.post('/api/withdrawals', authenticateToken, async (req, res) => {
 // ROTAS DO PAINEL ADMIN
 // ========================
 
-// --- INÍCIO DA ALTERAÇÃO CRÍTICA ---
 // Obter TODAS as tarefas ativas (para o painel admin)
 app.get('/api/admin/tasks/active', authenticateToken, authorizeAdmin, async (req, res) => {
     try {
@@ -297,7 +364,6 @@ app.get('/api/admin/tasks/active', authenticateToken, authorizeAdmin, async (req
         res.status(500).json({ error: 'Erro interno do servidor.' });
     }
 });
-// --- FIM DA ALTERAÇÃO CRÍTICA ---
 
 // Obter tarefas pendentes de aprovação
 app.get('/api/admin/tasks/pending', authenticateToken, authorizeAdmin, async (req, res) => {
@@ -455,11 +521,6 @@ app.put('/api/admin/withdrawals/:id/process', authenticateToken, authorizeAdmin,
 
 // Servir arquivos estáticos
 app.use(express.static(__dirname));
-
-// Rota fallback para SPA
-////app.get('*', (req, res) => {
-  //  res.sendFile(__dirname + '/index.html');
-//});
 
 app.listen(PORT, () => {
     console.log(`🚀 Servidor Taskin rodando em http://localhost:${PORT}`);
