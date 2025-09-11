@@ -23,11 +23,52 @@ const pool = new Pool({
     }
 });
 
+// Testar conexão com o banco
+pool.query('SELECT NOW()', (err, res) => {
+    if (err) {
+        console.error('❌ Erro ao conectar ao banco de dados:', err.stack);
+    } else {
+        console.log('✅ Conexão com PostgreSQL estabelecida com sucesso.');
+    }
+});
+
+// Configuração do Nodemailer
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
+});
+
+// Middleware de Autenticação JWT
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(401).json({ error: 'Acesso negado. Token não fornecido.' });
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: 'Token inválido.' });
+        req.user = user;
+        next();
+    });
+};
+
+// Middleware de Autorização de Administrador
+const authorizeAdmin = (req, res, next) => {
+    if (req.user.email === 'admin@taskin.com') {
+        next();
+    } else {
+        res.status(403).json({ error: 'Acesso negado. Área restrita a administradores.' });
+    }
+};
+
 // ===============================================
 // SCRIPT PARA CRIAR AS TABELAS AUTOMATICAMENTE
 // ===============================================
 const createTablesQuery = `
--- Tabela de Usuários
+-- Tabela de Usuários (ALTERADA: Adicionada coluna referrer_email)
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -36,6 +77,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     verification_token VARCHAR(6),
     balance DECIMAL(10, 2) DEFAULT 0.00,
+    referrer_email VARCHAR(255), -- Nova coluna para armazenar o e-mail do indicador
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -79,62 +121,21 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 );
 `;
 
-// Testar conexão e criar tabelas
-pool.query('SELECT NOW()', (err, res) => {
+// Executa o script de criação de tabelas
+pool.query(createTablesQuery, (err, res) => {
     if (err) {
-        console.error('❌ Erro ao conectar ao banco de dados:', err.stack);
+        console.error('❌ Erro ao criar tabelas:', err.stack);
     } else {
-        console.log('✅ Conexão com PostgreSQL estabelecida com sucesso.');
-
-        // Executa o script de criação de tabelas
-        pool.query(createTablesQuery, (err, res) => {
-            if (err) {
-                console.error('❌ Erro ao criar tabelas:', err.stack);
-            } else {
-                console.log('✅ Tabelas criadas com sucesso (ou já existiam).');
-            }
-        });
+        console.log('✅ Tabelas criadas com sucesso (ou já existiam).');
     }
 });
 // ===============================================
 // FIM DO SCRIPT DE CRIAÇÃO AUTOMÁTICA
 // ===============================================
 
-// Configuração do Nodemailer
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-});
-
-// Middleware de Autenticação JWT
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) return res.status(401).json({ error: 'Acesso negado. Token não fornecido.' });
-
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Token inválido.' });
-        req.user = user;
-        next();
-    });
-};
-
-// Middleware de Autorização de Administrador
-const authorizeAdmin = (req, res, next) => {
-    if (req.user.email === 'admin@taskin.com') {
-        next();
-    } else {
-        res.status(403).json({ error: 'Acesso negado. Área restrita a administradores.' });
-    }
-};
-
-// Rota de Registro de Usuário
+// Rota de Registro de Usuário (ALTERADA)
 app.post('/api/register', async (req, res) => {
-    const { name, email, whatsapp, password } = req.body;
+    const { name, email, whatsapp, password, referrerEmail } = req.body;
 
     if (!name || !email || !whatsapp || !password) {
         return res.status(400).json({ error: 'Todos os campos são obrigatórios.' });
@@ -150,10 +151,12 @@ app.post('/api/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, saltRounds);
         const verificationToken = Math.floor(100000 + Math.random() * 900000).toString();
 
+        // --- ALTERAÇÃO: Insere o referrer_email no banco de dados ---
         const result = await pool.query(
-            'INSERT INTO users (name, email, whatsapp, password_hash, verification_token) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, whatsapp',
-            [name, email, whatsapp, hashedPassword, verificationToken]
+            'INSERT INTO users (name, email, whatsapp, password_hash, verification_token, referrer_email) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, whatsapp',
+            [name, email, whatsapp, hashedPassword, verificationToken, referrerEmail || null]
         );
+        // --- FIM DA ALTERAÇÃO ---
 
         const newUser = result.rows[0];
 
@@ -289,6 +292,59 @@ app.post('/api/tasks/submit-proof', authenticateToken, async (req, res) => {
     }
 });
 
+// --- INÍCIO DA NOVA ROTA: Notificar Indicador ---
+// Rota para notificar o indicador que o indicado completou uma tarefa
+app.post('/api/tasks/notify-referrer', authenticateToken, async (req, res) => {
+    const { taskId } = req.body;
+    const userId = req.user.id;
+
+    if (!taskId) {
+        return res.status(400).json({ error: 'ID da tarefa é obrigatório.' });
+    }
+
+    try {
+        // Verifica se a tarefa foi aprovada
+        const userTask = await pool.query(
+            'SELECT * FROM user_tasks WHERE id = $1 AND user_id = $2 AND status = $3',
+            [taskId, userId, 'approved']
+        );
+
+        if (userTask.rows.length === 0) {
+            return res.status(400).json({ error: 'Tarefa não encontrada ou não aprovada.' });
+        }
+
+        // Busca o e-mail do indicador
+        const user = await pool.query('SELECT referrer_email FROM users WHERE id = $1', [userId]);
+
+        if (!user.rows[0].referrer_email) {
+            return res.status(200).json({ message: 'Nenhum indicador encontrado.' });
+        }
+
+        const referrerEmail = user.rows[0].referrer_email;
+
+        // Busca o ID do usuário indicador
+        const referrer = await pool.query('SELECT id FROM users WHERE email = $1', [referrerEmail]);
+
+        if (referrer.rows.length === 0) {
+            return res.status(404).json({ error: 'Usuário indicador não encontrado.' });
+        }
+
+        const referrerId = referrer.rows[0].id;
+
+        // Atualiza o saldo do indicador
+        await pool.query(
+            'UPDATE users SET balance = balance + $1 WHERE id = $2',
+            [1.00, referrerId]
+        );
+
+        res.json({ message: 'Indicador notificado e bônus de R$1,00 creditado com sucesso.' });
+    } catch (error) {
+        console.error('Erro ao notificar indicador:', error);
+        res.status(500).json({ error: 'Erro interno do servidor.' });
+    }
+});
+// --- FIM DA NOVA ROTA ---
+
 // Rota para obter histórico de tarefas do usuário
 app.get('/api/tasks/history', authenticateToken, async (req, res) => {
     const userId = req.user.id;
@@ -422,6 +478,30 @@ app.put('/api/admin/tasks/:id/approve', authenticateToken, authorizeAdmin, async
             'UPDATE users SET balance = balance + $1 WHERE id = $2',
             [value, user_id]
         );
+
+        // --- INÍCIO DA ALTERAÇÃO: Notifica o indicador ---
+        // Chama a rota internamente para creditar o bônus ao indicador
+        // Em um sistema real, isso seria feito via uma função interna, mas para simplificar, estamos fazendo uma chamada HTTP.
+        // Isso é apenas para fins de demonstração. Em produção, você deve extrair essa lógica para uma função separada.
+        try {
+            const notifyResponse = await fetch(`${process.env.BASE_URL || 'http://localhost:3000'}/api/tasks/notify-referrer`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': req.headers['authorization'] // Reutiliza o token do admin
+                },
+                body: JSON.stringify({ taskId: id })
+            });
+            const notifyData = await notifyResponse.json();
+            if (!notifyResponse.ok) {
+                console.warn('Erro ao notificar indicador:', notifyData.error);
+            } else {
+                console.log(notifyData.message);
+            }
+        } catch (notifyError) {
+            console.warn('Erro ao chamar rota de notificação:', notifyError.message);
+        }
+        // --- FIM DA ALTERAÇÃO ---
 
         res.json({ message: 'Tarefa aprovada e saldo creditado com sucesso.' });
     } catch (error) {
