@@ -289,6 +289,58 @@ app.post('/api/verify-email', async (req, res) => {
 });
 // --- FIM DA NOVA ROTA ---
 
+// --- INÍCIO DA NOVA ROTA: Reenviar Token de Verificação ---
+app.post('/api/resend-token', async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).json({ error: 'E-mail é obrigatório.' });
+    }
+
+    try {
+        // Verifica se o usuário existe
+        const result = await pool.query(
+            'SELECT id, is_verified FROM users WHERE email = $1',
+            [email]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Usuário não encontrado.' });
+        }
+
+        const user = result.rows[0];
+
+        // Verifica se o e-mail já foi verificado
+        if (user.is_verified) {
+            return res.status(400).json({ error: 'Este e-mail já foi verificado.' });
+        }
+
+        // Gera um novo token
+        const newToken = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Atualiza o token no banco de dados
+        await pool.query(
+            'UPDATE users SET verification_token = $1, created_at = NOW() WHERE id = $2',
+            [newToken, user.id]
+        );
+
+        // Envia o novo token por e-mail
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: 'Novo código de verificação - Taskin',
+            html: `<p>Seu novo código de verificação é: <strong>${newToken}</strong></p>`,
+        });
+
+        console.log(`[DEV] Novo código de verificação para ${email}: ${newToken}`);
+        res.json({ message: 'Novo código enviado com sucesso! Verifique sua caixa de entrada.' });
+    } catch (error) {
+        console.error('Erro ao reenviar token:', error);
+        res.status(500).json({ error: 'Erro interno do servidor.' });
+    }
+});
+// --- FIM DA NOVA ROTA ---
+
 // Rota para obter a PRÓXIMA tarefa disponível (UMA POR VEZ)
 app.get('/api/tasks/next', authenticateToken, async (req, res) => {
     const userId = req.user.id;
