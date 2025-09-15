@@ -33,78 +33,6 @@ pool.query('SELECT NOW()', (err, res) => {
 });
 
 // ===============================================
-// SCRIPT PARA CRIAR O USUÁRIO ADMINISTRADOR AUTOMATICAMENTE
-// ===============================================
-async function createAdminUser() {
-    const adminEmail = 'admin@taskin.com';
-    const adminName = 'Administrador';
-    const adminPassword = 'Caio@2102'; // <-- ALTERE AQUI SE QUISER UMA SENHA DIFERENTE
-    const adminWhatsapp = '81999999999';
-
-    try {
-        // Verifica se o admin já existe
-        const result = await pool.query('SELECT id FROM users WHERE email = $1', [adminEmail]);
-        if (result.rows.length > 0) {
-            console.log('✅ Usuário administrador já existe.');
-            return;
-        }
-
-        // Gera o hash da senha
-        const saltRounds = 10;
-        const hashedPassword = await bcrypt.hash(adminPassword, saltRounds);
-
-        // Insere o usuário admin
-        await pool.query(
-            `INSERT INTO users (name, email, whatsapp, password_hash, is_verified)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [adminName, adminEmail, adminWhatsapp, hashedPassword, true]
-        );
-
-        console.log('✅ Usuário administrador criado com sucesso!');
-    } catch (error) {
-        console.error('❌ Erro ao criar usuário administrador:', error);
-    }
-}
-
-// Executa o script de criação do admin
-createAdminUser();
-// ===============================================
-// FIM DO SCRIPT DE CRIAÇÃO DO ADMIN
-// ===============================================
-
-// Configuração do Nodemailer
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-});
-
-// Middleware de Autenticação JWT
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) return res.status(401).json({ error: 'Acesso negado. Token não fornecido.' });
-
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Token inválido.' });
-        req.user = user;
-        next();
-    });
-};
-
-// Middleware de Autorização de Administrador
-const authorizeAdmin = (req, res, next) => {
-    if (req.user.email === 'admin@taskin.com') {
-        next();
-    } else {
-        res.status(403).json({ error: 'Acesso negado. Área restrita a administradores.' });
-    }
-};
-
-// ===============================================
 // SCRIPT PARA CRIAR AS TABELAS AUTOMATICAMENTE
 // ===============================================
 const createTablesQuery = `
@@ -169,11 +97,81 @@ pool.query(createTablesQuery, (err, res) => {
         console.error('❌ Erro ao criar tabelas:', err.stack);
     } else {
         console.log('✅ Tabelas criadas com sucesso (ou já existiam).');
+        // --- CHAMA A CRIAÇÃO DO ADMIN APÓS AS TABELAS ESTAREM PRONTAS ---
+        createAdminUser();
     }
 });
+
 // ===============================================
-// FIM DO SCRIPT DE CRIAÇÃO AUTOMÁTICA
+// SCRIPT PARA CRIAR O USUÁRIO ADMINISTRADOR AUTOMATICAMENTE
 // ===============================================
+async function createAdminUser() {
+    const adminEmail = 'admin@taskin.com';
+    const adminName = 'Administrador';
+    const adminPassword = 'Caio@2102'; // <-- ALTERE AQUI SE QUISER UMA SENHA DIFERENTE
+    const adminWhatsapp = '81999999999';
+
+    try {
+        // Verifica se o admin já existe
+        const result = await pool.query('SELECT id FROM users WHERE email = $1', [adminEmail]);
+        if (result.rows.length > 0) {
+            console.log('✅ Usuário administrador já existe.');
+            return;
+        }
+
+        // Gera o hash da senha
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(adminPassword, saltRounds);
+
+        // Insere o usuário admin
+        await pool.query(
+            `INSERT INTO users (name, email, whatsapp, password_hash, is_verified)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [adminName, adminEmail, adminWhatsapp, hashedPassword, true]
+        );
+
+        console.log('✅ Usuário administrador criado com sucesso!');
+    } catch (error) {
+        console.error('❌ Erro ao criar usuário administrador:', error);
+    }
+}
+// --- REMOVA A CHAMADA AUTOMÁTICA DAQUI ---
+// createAdminUser(); // <-- ESTA LINHA FOI REMOVIDA
+// ===============================================
+// FIM DO SCRIPT DE CRIAÇÃO DO ADMIN
+// ===============================================
+
+// Configuração do Nodemailer
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
+});
+
+// Middleware de Autenticação JWT
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(401).json({ error: 'Acesso negado. Token não fornecido.' });
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: 'Token inválido.' });
+        req.user = user;
+        next();
+    });
+};
+
+// Middleware de Autorização de Administrador
+const authorizeAdmin = (req, res, next) => {
+    if (req.user.email === 'admin@taskin.com') {
+        next();
+    } else {
+        res.status(403).json({ error: 'Acesso negado. Área restrita a administradores.' });
+    }
+};
 
 // Rota de Registro de Usuário (ALTERADA - Versão Final com Device ID)
 app.post('/api/register', async (req, res) => {
