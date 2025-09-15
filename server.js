@@ -91,50 +91,97 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 );
 `;
 
-// Executa o script de criação de tabelas
+// ===============================================
+// SCRIPT DE MIGRAÇÃO: Adiciona coluna is_verified se não existir
+// ===============================================
+const addIsVerifiedColumnQuery = `
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name='users' AND column_name='is_verified') THEN
+        ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT FALSE;
+        RAISE NOTICE 'Coluna is_verified adicionada à tabela users.';
+    END IF;
+END $$;
+`;
+
+// ===============================================
+// SCRIPT DE MIGRAÇÃO: Adiciona coluna device_id se não existir
+// ===============================================
+const addDeviceIdColumnQuery = `
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name='users' AND column_name='device_id') THEN
+        ALTER TABLE users ADD COLUMN device_id VARCHAR(255) UNIQUE;
+        RAISE NOTICE 'Coluna device_id adicionada à tabela users.';
+    END IF;
+END $$;
+`;
+
+// Executa os scripts em ordem
 pool.query(createTablesQuery, async (err, res) => {
     if (err) {
         console.error('❌ Erro ao criar tabelas:', err.stack);
-        process.exit(1); // Sai da aplicação se não conseguir criar as tabelas
+        process.exit(1);
     } else {
         console.log('✅ Tabelas criadas com sucesso (ou já existiam).');
     }
 
-    // ===============================================
-    // SCRIPT PARA CRIAR O USUÁRIO ADMINISTRADOR AUTOMATICAMENTE
-    // ===============================================
-    async function createAdminUser() {
-        const adminEmail = 'admin@taskin.com';
-        const adminName = 'Administrador';
-        const adminPassword = 'Caio@2102';
-        const adminWhatsapp = '81999999999';
+    try {
+        // Executa migração para adicionar is_verified
+        await pool.query(addIsVerifiedColumnQuery);
+        console.log('✅ Migração: Coluna is_verified garantida.');
 
-        try {
-            const result = await pool.query('SELECT id FROM users WHERE email = $1', [adminEmail]);
-            if (result.rows.length > 0) {
-                console.log('✅ Usuário administrador já existe.');
-                return;
-            }
+        // Executa migração para adicionar device_id
+        await pool.query(addDeviceIdColumnQuery);
+        console.log('✅ Migração: Coluna device_id garantida.');
 
-            const saltRounds = 10;
-            const hashedPassword = await bcrypt.hash(adminPassword, saltRounds);
+        // --- CRIA O USUÁRIO ADMIN APÓS AS MIGRAÇÕES ---
+        await createAdminUser();
 
-            await pool.query(
-                `INSERT INTO users (name, email, whatsapp, password_hash, is_verified)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [adminName, adminEmail, adminWhatsapp, hashedPassword, true]
-            );
-
-            console.log('✅ Usuário administrador criado com sucesso!');
-        } catch (error) {
-            console.error('❌ Erro ao criar usuário administrador:', error);
-        }
+        // --- INICIALIZA O SERVIDOR APÓS TUDO ESTAR PRONTO ---
+        startServer();
+    } catch (migrationError) {
+        console.error('❌ Erro durante as migrações:', migrationError);
+        process.exit(1);
     }
+});
 
-    // Cria o usuário administrador
-    await createAdminUser();
+// ===============================================
+// SCRIPT PARA CRIAR O USUÁRIO ADMINISTRADOR AUTOMATICAMENTE
+// ===============================================
+async function createAdminUser() {
+    const adminEmail = 'admin@taskin.com';
+    const adminName = 'Administrador';
+    const adminPassword = 'Caio@2102';
+    const adminWhatsapp = '81999999999';
 
-    // --- A PARTIR DAQUI, TUDO ESTÁ DENTRO DO CALLBACK ---
+    try {
+        const result = await pool.query('SELECT id FROM users WHERE email = $1', [adminEmail]);
+        if (result.rows.length > 0) {
+            console.log('✅ Usuário administrador já existe.');
+            return;
+        }
+
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(adminPassword, saltRounds);
+
+        await pool.query(
+            `INSERT INTO users (name, email, whatsapp, password_hash, is_verified)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [adminName, adminEmail, adminWhatsapp, hashedPassword, true]
+        );
+
+        console.log('✅ Usuário administrador criado com sucesso!');
+    } catch (error) {
+        console.error('❌ Erro ao criar usuário administrador:', error);
+        throw error; // Propaga o erro para ser tratado no bloco try/catch acima
+    }
+}
+
+// Função para iniciar o servidor e carregar todas as rotas
+function startServer() {
     // Configuração do Nodemailer
     const transporter = nodemailer.createTransport({
         service: 'gmail',
@@ -167,7 +214,7 @@ pool.query(createTablesQuery, async (err, res) => {
         }
     };
 
-    // ... (TODAS AS ROTAS DO SEU BACKEND VÃO AQUI) ...
+    // ... (TODAS AS ROTAS DO SEU BACKEND) ...
 
     // Rota de Registro de Usuário (ALTERADA - Versão Final com Device ID)
     app.post('/api/register', async (req, res) => {
@@ -768,11 +815,10 @@ pool.query(createTablesQuery, async (err, res) => {
     // Servir arquivos estáticos
     app.use(express.static(__dirname));
 
-    // SÓ INICIA O SERVIDOR APÓS TUDO ESTAR PRONTO
+    // Inicia o servidor
     app.listen(PORT, () => {
         console.log(`🚀 Servidor Taskin rodando em http://localhost:${PORT}`);
         console.log(`🌐 Site do Usuário: http://localhost:${PORT}`);
         console.log(`🛠️  Painel Admin: http://localhost:${PORT}/admin.html`);
     });
-    // --- FIM DO CALLBACK ---
-});
+}
