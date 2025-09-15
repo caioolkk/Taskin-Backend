@@ -32,6 +32,46 @@ pool.query('SELECT NOW()', (err, res) => {
     }
 });
 
+// ===============================================
+// SCRIPT PARA CRIAR O USUÁRIO ADMINISTRADOR AUTOMATICAMENTE
+// ===============================================
+async function createAdminUser() {
+    const adminEmail = 'admin@taskin.com';
+    const adminName = 'Administrador';
+    const adminPassword = 'Caio@2102'; // <-- ALTERE AQUI SE QUISER UMA SENHA DIFERENTE
+    const adminWhatsapp = '81999999999';
+
+    try {
+        // Verifica se o admin já existe
+        const result = await pool.query('SELECT id FROM users WHERE email = $1', [adminEmail]);
+        if (result.rows.length > 0) {
+            console.log('✅ Usuário administrador já existe.');
+            return;
+        }
+
+        // Gera o hash da senha
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(adminPassword, saltRounds);
+
+        // Insere o usuário admin
+        await pool.query(
+            `INSERT INTO users (name, email, whatsapp, password_hash, is_verified)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [adminName, adminEmail, adminWhatsapp, hashedPassword, true]
+        );
+
+        console.log('✅ Usuário administrador criado com sucesso!');
+    } catch (error) {
+        console.error('❌ Erro ao criar usuário administrador:', error);
+    }
+}
+
+// Executa o script de criação do admin
+createAdminUser();
+// ===============================================
+// FIM DO SCRIPT DE CRIAÇÃO DO ADMIN
+// ===============================================
+
 // Configuração do Nodemailer
 const transporter = nodemailer.createTransport({
     service: 'gmail',
