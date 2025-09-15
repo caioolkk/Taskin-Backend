@@ -214,8 +214,6 @@ function startServer() {
         }
     };
 
-    // ... (TODAS AS ROTAS DO SEU BACKEND) ...
-
     // Rota de Registro de Usuário (ALTERADA - Versão Final com Device ID)
     app.post('/api/register', async (req, res) => {
         const { name, email, whatsapp, password, referrerEmail, device_id } = req.body;
@@ -758,10 +756,13 @@ function startServer() {
         }
     });
 
-    // Obter todos os usuários (Admin)
+    // Obter todos os usuários (Admin) - CORRIGIDA: Converte balance para número
     app.get('/api/admin/users', authenticateToken, authorizeAdmin, async (req, res) => {
         try {
-            const result = await pool.query('SELECT id, name, email, whatsapp, balance, created_at FROM users ORDER BY created_at DESC');
+            // Converte o campo balance para um número no SQL
+            const result = await pool.query(
+                'SELECT id, name, email, whatsapp, CAST(balance AS NUMERIC) as balance, created_at FROM users ORDER BY created_at DESC'
+            );
             res.json(result.rows);
         } catch (error) {
             console.error('Erro ao buscar usuários:', error);
