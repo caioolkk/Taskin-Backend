@@ -622,11 +622,12 @@ function startServer() {
     // ROTAS DO PAINEL ADMIN
     // ========================
 
-    // Obter TODAS as tarefas ativas (para o painel admin)
+    // Obter TODAS as tarefas ativas (para o painel admin) - CORRIGIDA
     app.get('/api/admin/tasks/active', authenticateToken, authorizeAdmin, async (req, res) => {
         try {
+            // Converte o campo value para um número no SQL
             const result = await pool.query(
-                'SELECT id, title, summary, network, value, current_completions, max_completions, status FROM tasks WHERE status = $1 ORDER BY id DESC',
+                'SELECT id, title, summary, network, CAST(value AS NUMERIC) as value, current_completions, max_completions, status FROM tasks WHERE status = $1 ORDER BY id DESC',
                 ['active']
             );
             res.json(result.rows);
@@ -756,7 +757,7 @@ function startServer() {
         }
     });
 
-    // Obter todos os usuários (Admin) - CORRIGIDA: Converte balance para número
+    // Obter todos os usuários (Admin) - CORRIGIDA
     app.get('/api/admin/users', authenticateToken, authorizeAdmin, async (req, res) => {
         try {
             // Converte o campo balance para um número no SQL
