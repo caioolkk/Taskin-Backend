@@ -814,6 +814,29 @@ function startServer() {
         }
     });
 
+    // --- INÍCIO DA ALTERAÇÃO PRINCIPAL: Rota DELETE para excluir tarefas ---
+    // Excluir uma tarefa (Admin)
+    app.delete('/api/admin/tasks/:id', authenticateToken, authorizeAdmin, async (req, res) => {
+        const { id } = req.params;
+
+        try {
+            // Primeiro, verifica se a tarefa existe
+            const taskCheck = await pool.query('SELECT id FROM tasks WHERE id = $1', [id]);
+            if (taskCheck.rows.length === 0) {
+                return res.status(404).json({ error: 'Tarefa não encontrada.' });
+            }
+
+            // Deleta a tarefa. O CASCADE no banco de dados cuidará de deletar as entradas relacionadas em user_tasks.
+            await pool.query('DELETE FROM tasks WHERE id = $1', [id]);
+
+            res.json({ message: 'Tarefa excluída com sucesso.' });
+        } catch (error) {
+            console.error('Erro ao excluir tarefa:', error);
+            res.status(500).json({ error: 'Erro interno do servidor.' });
+        }
+    });
+    // --- FIM DA ALTERAÇÃO PRINCIPAL ---
+
     // Servir arquivos estáticos
     app.use(express.static(__dirname));
 
