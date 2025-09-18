@@ -119,6 +119,20 @@ BEGIN
 END $$;
 `;
 
+// ===============================================
+// SCRIPT DE MIGRAÇÃO: Adiciona coluna referrer_email se não existir
+// ===============================================
+const addReferrerEmailColumnQuery = `
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name='users' AND column_name='referrer_email') THEN
+        ALTER TABLE users ADD COLUMN referrer_email VARCHAR(255);
+        RAISE NOTICE 'Coluna referrer_email adicionada à tabela users.';
+    END IF;
+END $$;
+`;
+
 // Executa os scripts em ordem
 pool.query(createTablesQuery, async (err, res) => {
     if (err) {
@@ -136,6 +150,10 @@ pool.query(createTablesQuery, async (err, res) => {
         // Executa migração para adicionar device_id
         await pool.query(addDeviceIdColumnQuery);
         console.log('✅ Migração: Coluna device_id garantida.');
+
+        // Executa migração para adicionar referrer_email
+        await pool.query(addReferrerEmailColumnQuery);
+        console.log('✅ Migração: Coluna referrer_email garantida.');
 
         // --- CRIA O USUÁRIO ADMIN APÓS AS MIGRAÇÕES ---
         await createAdminUser();
