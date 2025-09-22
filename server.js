@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 
 dotenv.config();
 
@@ -36,7 +37,7 @@ pool.query('SELECT NOW()', (err, res) => {
 // SCRIPT PARA CRIAR AS TABELAS AUTOMATICAMENTE
 // ===============================================
 const createTablesQuery = `
--- Tabela de Usuários (ALTERADA: Adicionadas colunas is_verified, device_id e referrer_email)
+-- Tabela de Usuários (ALTERADA: Foco em afiliados, não microtarefas)
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -51,35 +52,15 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabela de Tarefas
-CREATE TABLE IF NOT EXISTS tasks (
+-- Tabela de Dispositivos (NOVA: Track de Device ID)
+CREATE TABLE IF NOT EXISTS device_links (
     id SERIAL PRIMARY KEY,
-    title VARCHAR(255) NOT NULL,
-    summary TEXT NOT NULL,
-    details TEXT NOT NULL,
-    link TEXT NOT NULL,
-    network VARCHAR(100) NOT NULL,
-    value DECIMAL(10, 2) NOT NULL,
-    max_completions INTEGER NOT NULL,
-    current_completions INTEGER DEFAULT 0,
-    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'completed')),
+    device_id VARCHAR(255) UNIQUE NOT NULL,
+    affiliate_link TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabela de Relacionamento Usuário-Tarefas
-CREATE TABLE IF NOT EXISTS user_tasks (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
-    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'submitted', 'approved', 'rejected')),
-    proof_link TEXT,
-    submitted_at TIMESTAMP,
-    approved_at TIMESTAMP,
-    rejected_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Tabela de Saques
+-- Tabela de Saques (MANTIDA, mas simplificada)
 CREATE TABLE IF NOT EXISTS withdrawals (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -89,20 +70,6 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     processed_at TIMESTAMP
 );
-`;
-
-// ===============================================
-// SCRIPT DE MIGRAÇÃO: Adiciona coluna is_verified se não existir
-// ===============================================
-const addIsVerifiedColumnQuery = `
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                   WHERE table_name='users' AND column_name='is_verified') THEN
-        ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT FALSE;
-        RAISE NOTICE 'Coluna is_verified adicionada à tabela users.';
-    END IF;
-END $$;
 `;
 
 // ===============================================
@@ -119,20 +86,6 @@ BEGIN
 END $$;
 `;
 
-// ===============================================
-// SCRIPT DE MIGRAÇÃO: Adiciona coluna referrer_email se não existir
-// ===============================================
-const addReferrerEmailColumnQuery = `
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                   WHERE table_name='users' AND column_name='referrer_email') THEN
-        ALTER TABLE users ADD COLUMN referrer_email VARCHAR(255);
-        RAISE NOTICE 'Coluna referrer_email adicionada à tabela users.';
-    END IF;
-END $$;
-`;
-
 // Executa os scripts em ordem
 pool.query(createTablesQuery, async (err, res) => {
     if (err) {
@@ -143,17 +96,9 @@ pool.query(createTablesQuery, async (err, res) => {
     }
 
     try {
-        // Executa migração para adicionar is_verified
-        await pool.query(addIsVerifiedColumnQuery);
-        console.log('✅ Migração: Coluna is_verified garantida.');
-
         // Executa migração para adicionar device_id
         await pool.query(addDeviceIdColumnQuery);
         console.log('✅ Migração: Coluna device_id garantida.');
-
-        // Executa migração para adicionar referrer_email
-        await pool.query(addReferrerEmailColumnQuery);
-        console.log('✅ Migração: Coluna referrer_email garantida.');
 
         // --- CRIA O USUÁRIO ADMIN APÓS AS MIGRAÇÕES ---
         await createAdminUser();
@@ -172,7 +117,7 @@ pool.query(createTablesQuery, async (err, res) => {
 async function createAdminUser() {
     const adminEmail = 'admin@taskin.com';
     const adminName = 'Administrador';
-    const adminPassword = 'Caio@2102';
+    const adminPassword = process.env.ADMIN_PASSWORD || 'Caio@2102'; // Use variável de ambiente em produção
     const adminWhatsapp = '81999999999';
 
     try {
@@ -194,7 +139,7 @@ async function createAdminUser() {
         console.log('✅ Usuário administrador criado com sucesso!');
     } catch (error) {
         console.error('❌ Erro ao criar usuário administrador:', error);
-        throw error; // Propaga o erro para ser tratado no bloco try/catch acima
+        throw error;
     }
 }
 
@@ -232,7 +177,7 @@ function startServer() {
         }
     };
 
-    // Rota de Registro de Usuário (ALTERADA - Versão Final com Device ID)
+    // Rota de Registro de Usuário (ALTERADA - Foco em Afiliados)
     app.post('/api/register', async (req, res) => {
         const { name, email, whatsapp, password, referrerEmail, device_id } = req.body;
 
@@ -324,8 +269,8 @@ function startServer() {
         }
     });
 
-    // --- INÍCIO DA NOVA ROTA: Verificar Device ID ---
-    app.post('/api/check-device', async (req, res) => {
+    // --- ROTA DE TRACKING DE DEVICE ID (NOVA) ---
+    app.post('/api/track-device', async (req, res) => {
         const { device_id } = req.body;
 
         if (!device_id) {
@@ -333,269 +278,71 @@ function startServer() {
         }
 
         try {
-            const result = await pool.query('SELECT id FROM users WHERE device_id = $1', [device_id]);
-
-            res.json({ exists: result.rows.length > 0 });
-        } catch (error) {
-            console.error('Erro ao verificar device ID:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-    // --- FIM DA NOVA ROTA ---
-
-    // --- INÍCIO DA NOVA ROTA: Verificar E-mail ---
-    app.post('/api/verify-email', async (req, res) => {
-        const { email, token } = req.body;
-
-        if (!email || !token) {
-            return res.status(400).json({ error: 'E-mail e token são obrigatórios.' });
-        }
-
-        try {
-            const result = await pool.query(
-                'SELECT id, verification_token, created_at FROM users WHERE email = $1',
-                [email]
-            );
-
-            if (result.rows.length === 0) {
-                return res.status(404).json({ error: 'Usuário não encontrado.' });
-            }
-
-            const user = result.rows[0];
-
-            // Verifica se o token corresponde
-            if (user.verification_token !== token) {
-                return res.status(400).json({ error: 'Token inválido.' });
-            }
-
-            // Verifica se o token expirou (1 hora)
-            const tokenAge = new Date() - new Date(user.created_at);
-            const oneHourInMs = 60 * 60 * 1000;
-            if (tokenAge > oneHourInMs) {
-                return res.status(400).json({ error: 'Token expirado. Solicite um novo.' });
-            }
-
-            // Atualiza o status do usuário para verificado
-            await pool.query('UPDATE users SET is_verified = TRUE, verification_token = NULL WHERE id = $1', [user.id]);
-
-            res.json({ message: 'E-mail verificado com sucesso! Você já pode fazer login.' });
-        } catch (error) {
-            console.error('Erro na verificação de e-mail:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-    // --- FIM DA NOVA ROTA ---
-
-    // --- INÍCIO DA NOVA ROTA: Reenviar Token de Verificação ---
-    app.post('/api/resend-token', async (req, res) => {
-        const { email } = req.body;
-
-        if (!email) {
-            return res.status(400).json({ error: 'E-mail é obrigatório.' });
-        }
-
-        try {
-            // Verifica se o usuário existe
-            const result = await pool.query(
-                'SELECT id, is_verified FROM users WHERE email = $1',
-                [email]
-            );
-
-            if (result.rows.length === 0) {
-                return res.status(404).json({ error: 'Usuário não encontrado.' });
-            }
-
-            const user = result.rows[0];
-
-            // Verifica se o e-mail já foi verificado
-            if (user.is_verified) {
-                return res.status(400).json({ error: 'Este e-mail já foi verificado.' });
-            }
-
-            // Gera um novo token
-            const newToken = Math.floor(100000 + Math.random() * 900000).toString();
-
-            // Atualiza o token no banco de dados
+            // Salva ou atualiza o device_id no banco
             await pool.query(
-                'UPDATE users SET verification_token = $1, created_at = NOW() WHERE id = $2',
-                [newToken, user.id]
+                `INSERT INTO device_links (device_id, affiliate_link) 
+                 VALUES ($1, $2) 
+                 ON CONFLICT (device_id) 
+                 DO UPDATE SET affiliate_link = $2`,
+                [device_id, 'https://peer2profit.com/?ref=SEUCODIGO']
             );
 
-            // Envia o novo token por e-mail
-            await transporter.sendMail({
-                from: process.env.EMAIL_USER,
-                to: email,
-                subject: 'Novo código de verificação - Taskin',
-                html: `<p>Seu novo código de verificação é: <strong>${newToken}</strong></p>`,
-            });
-
-            console.log(`[DEV] Novo código de verificação para ${email}: ${newToken}`);
-            res.json({ message: 'Novo código enviado com sucesso! Verifique sua caixa de entrada.' });
+            res.json({ message: 'Device ID trackeado com sucesso.' });
         } catch (error) {
-            console.error('Erro ao reenviar token:', error);
+            console.error('Erro ao trackear device ID:', error);
             res.status(500).json({ error: 'Erro interno do servidor.' });
         }
     });
-    // --- FIM DA NOVA ROTA ---
+    // --- FIM DA ROTA DE TRACKING ---
 
-    // Rota para obter a PRÓXIMA tarefa disponível (UMA POR VEZ)
-    app.get('/api/tasks/next', authenticateToken, async (req, res) => {
-        const userId = req.user.id;
+    // --- ROTA DE DOWNLOAD SEGURO (NOVA) ---
+    app.get('/api/download', (req, res) => {
+        // Redireciona SEMPRE pro seu link de afiliado
+        res.redirect('https://peer2profit.com/?ref=SEUCODIGO');
+    });
+    // --- FIM DA ROTA DE DOWNLOAD ---
+
+    // --- ROTA DE DOWNLOAD DINÂMICO POR DEVICE ID (AVANÇADA) ---
+    app.get('/api/secure-download', async (req, res) => {
+        const userAgent = req.get('User-Agent');
+        const ip = req.ip;
+        const deviceId = crypto.createHash('md5').update(userAgent + ip).digest('hex');
 
         try {
-            // Verifica se o usuário já tem uma tarefa pendente ou em análise
-            const pendingTask = await pool.query(
-                'SELECT ut.id, ut.status, t.* FROM user_tasks ut JOIN tasks t ON ut.task_id = t.id WHERE ut.user_id = $1 AND ut.status IN ($2, $3)',
-                [userId, 'pending', 'submitted']
-            );
-
-            if (pendingTask.rows.length > 0) {
-                return res.json({ task: pendingTask.rows[0] });
-            }
-
-            // Se não tem tarefa pendente, busca a próxima disponível
-            const availableTask = await pool.query(
-                `SELECT * FROM tasks 
-                 WHERE status = 'active' 
-                 AND current_completions < max_completions 
-                 AND id NOT IN (
-                     SELECT task_id FROM user_tasks WHERE user_id = $1 AND status = 'approved'
-                 )
-                 ORDER BY id ASC LIMIT 1`,
-                [userId]
-            );
-
-            if (availableTask.rows.length === 0) {
-                return res.json({ task: null, message: 'Nenhuma tarefa disponível no momento.' });
-            }
-
-            const task = availableTask.rows[0];
-
-            // Atribui a tarefa ao usuário
+            // Salva no banco
             await pool.query(
-                'INSERT INTO user_tasks (user_id, task_id, status) VALUES ($1, $2, $3)',
-                [userId, task.id, 'pending']
+                `INSERT INTO device_links (device_id, affiliate_link, created_at) 
+                 VALUES ($1, $2, NOW()) 
+                 ON CONFLICT (device_id) 
+                 DO NOTHING`,
+                [deviceId, 'https://peer2profit.com/?ref=SEUCODIGO']
             );
 
-            res.json({ task: task });
+            // Redireciona SEMPRE pro seu link
+            res.redirect('https://peer2profit.com/?ref=SEUCODIGO');
         } catch (error) {
-            console.error('Erro ao buscar próxima tarefa:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
+            console.error('Erro ao gerar link seguro:', error);
+            res.redirect('https://peer2profit.com/?ref=SEUCODIGO');
         }
     });
+    // --- FIM DA ROTA DINÂMICA ---
 
-    // Rota para enviar comprovante
-    app.post('/api/tasks/submit-proof', authenticateToken, async (req, res) => {
-        const { taskId, proofLink } = req.body;
-        const userId = req.user.id;
-
-        if (!taskId || !proofLink) {
-            return res.status(400).json({ error: 'ID da tarefa e link do comprovante são obrigatórios.' });
-        }
-
-        try {
-            // Verifica se a tarefa pertence ao usuário e está pendente
-            const userTask = await pool.query(
-                'SELECT * FROM user_tasks WHERE id = $1 AND user_id = $2 AND status = $3',
-                [taskId, userId, 'pending']
-            );
-
-            if (userTask.rows.length === 0) {
-                return res.status(400).json({ error: 'Tarefa não encontrada ou já processada.' });
-            }
-
-            // Atualiza para "submitted"
-            await pool.query(
-                'UPDATE user_tasks SET status = $1, proof_link = $2, submitted_at = NOW() WHERE id = $3',
-                ['submitted', proofLink, taskId]
-            );
-
-            res.json({ message: 'Comprovante enviado com sucesso. Aguarde aprovação.' });
-        } catch (error) {
-            console.error('Erro ao enviar comprovante:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-
-    // --- INÍCIO DA ROTA ALTERADA: Notificar Indicador ---
-    // Rota para notificar o indicador que o indicado completou uma tarefa
-    app.post('/api/tasks/notify-referrer', authenticateToken, async (req, res) => {
-        const { taskId } = req.body;
-        const userId = req.user.id;
-
-        if (!taskId) {
-            return res.status(400).json({ error: 'ID da tarefa é obrigatório.' });
-        }
-
-        try {
-            // Verifica se a tarefa foi aprovada
-            const userTask = await pool.query(
-                'SELECT * FROM user_tasks WHERE id = $1 AND user_id = $2 AND status = $3',
-                [taskId, userId, 'approved']
-            );
-
-            if (userTask.rows.length === 0) {
-                return res.status(400).json({ error: 'Tarefa não encontrada ou não aprovada.' });
-            }
-
-            // Busca o e-mail do indicador e verifica se o usuário indicado está em conformidade
-            const user = await pool.query('SELECT referrer_email, is_verified, device_id FROM users WHERE id = $1', [userId]);
-
-            if (!user.rows[0].is_verified) {
-                return res.status(403).json({ error: 'O usuário indicado precisa ter o e-mail verificado para liberar o bônus.' });
-            }
-
-            if (!user.rows[0].device_id) {
-                return res.status(403).json({ error: 'O usuário indicado precisa ter um device_id válido para liberar o bônus.' });
-            }
-
-            if (!user.rows[0].referrer_email) {
-                return res.status(200).json({ message: 'Nenhum indicador encontrado.' });
-            }
-
-            const referrerEmail = user.rows[0].referrer_email;
-
-            // Busca o ID do usuário indicador
-            const referrer = await pool.query('SELECT id FROM users WHERE email = $1', [referrerEmail]);
-
-            if (referrer.rows.length === 0) {
-                return res.status(404).json({ error: 'Usuário indicador não encontrado.' });
-            }
-
-            const referrerId = referrer.rows[0].id;
-
-            // Atualiza o saldo do indicador
-            await pool.query(
-                'UPDATE users SET balance = balance + $1 WHERE id = $2',
-                [1.00, referrerId]
-            );
-
-            res.json({ message: 'Indicador notificado e bônus de R$1,00 creditado com sucesso.' });
-        } catch (error) {
-            console.error('Erro ao notificar indicador:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-    // --- FIM DA ROTA ALTERADA ---
-
-    // Rota para obter histórico de tarefas do usuário
-    app.get('/api/tasks/history', authenticateToken, async (req, res) => {
+    // Rota para obter histórico de saques do usuário
+    app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
         const userId = req.user.id;
 
         try {
             const result = await pool.query(
-                `SELECT ut.id, ut.status, ut.submitted_at, ut.approved_at, ut.rejected_at, 
-                        t.title, t.value, t.network
-                 FROM user_tasks ut
-                 JOIN tasks t ON ut.task_id = t.id
-                 WHERE ut.user_id = $1
-                 ORDER BY ut.created_at DESC`,
+                `SELECT id, amount, pix_key, status, requested_at, processed_at
+                 FROM withdrawals 
+                 WHERE user_id = $1
+                 ORDER BY requested_at DESC`,
                 [userId]
             );
 
             res.json(result.rows);
         } catch (error) {
-            console.error('Erro ao buscar histórico:', error);
+            console.error('Erro ao buscar histórico de saques:', error);
             res.status(500).json({ error: 'Erro interno do servidor.' });
         }
     });
@@ -640,147 +387,11 @@ function startServer() {
     // ROTAS DO PAINEL ADMIN
     // ========================
 
-    // Obter TODAS as tarefas ativas (para o painel admin) - CORRIGIDA
-    app.get('/api/admin/tasks/active', authenticateToken, authorizeAdmin, async (req, res) => {
-        try {
-            // Converte o campo value para um número no SQL
-            const result = await pool.query(
-                'SELECT id, title, summary, network, CAST(value AS NUMERIC) as value, current_completions, max_completions, status FROM tasks WHERE status = $1 ORDER BY id DESC',
-                ['active']
-            );
-            res.json(result.rows);
-        } catch (error) {
-            console.error('Erro ao buscar tarefas ativas:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-
-    // Obter tarefas pendentes de aprovação
-    app.get('/api/admin/tasks/pending', authenticateToken, authorizeAdmin, async (req, res) => {
-        try {
-            const result = await pool.query(
-                `SELECT ut.id as user_task_id, ut.proof_link, ut.submitted_at,
-                        u.name as user_name, u.email as user_email, u.whatsapp,
-                        t.title, t.value, t.network
-                 FROM user_tasks ut
-                 JOIN users u ON ut.user_id = u.id
-                 JOIN tasks t ON ut.task_id = t.id
-                 WHERE ut.status = 'submitted'
-                 ORDER BY ut.submitted_at ASC`
-            );
-            res.json(result.rows);
-        } catch (error) {
-            console.error('Erro ao buscar tarefas pendentes:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-
-    // Aprovar tarefa
-    app.put('/api/admin/tasks/:id/approve', authenticateToken, authorizeAdmin, async (req, res) => {
-        const { id } = req.params;
-
-        try {
-            // Busca detalhes da tarefa
-            const userTask = await pool.query(
-                `SELECT ut.user_id, t.value, t.id as task_id
-                 FROM user_tasks ut
-                 JOIN tasks t ON ut.task_id = t.id
-                 WHERE ut.id = $1 AND ut.status = 'submitted'`,
-                [id]
-            );
-
-            if (userTask.rows.length === 0) {
-                return res.status(404).json({ error: 'Tarefa não encontrada ou já processada.' });
-            }
-
-            const { user_id, value, task_id } = userTask.rows[0];
-
-            // Atualiza status da tarefa do usuário
-            await pool.query(
-                'UPDATE user_tasks SET status = $1, approved_at = NOW() WHERE id = $2',
-                ['approved', id]
-            );
-
-            // Atualiza contagem da tarefa
-            await pool.query(
-                'UPDATE tasks SET current_completions = current_completions + 1 WHERE id = $1',
-                [task_id]
-            );
-
-            // Atualiza saldo do usuário
-            await pool.query(
-                'UPDATE users SET balance = balance + $1 WHERE id = $2',
-                [value, user_id]
-            );
-
-            // Chama a rota internamente para creditar o bônus ao indicador
-            try {
-                const notifyResponse = await fetch(`${process.env.BASE_URL || 'http://localhost:3000'}/api/tasks/notify-referrer`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': req.headers['authorization']
-                    },
-                    body: JSON.stringify({ taskId: id })
-                });
-                const notifyData = await notifyResponse.json();
-                if (!notifyResponse.ok) {
-                    console.warn('Erro ao notificar indicador:', notifyData.error);
-                } else {
-                    console.log(notifyData.message);
-                }
-            } catch (notifyError) {
-                console.warn('Erro ao chamar rota de notificação:', notifyError.message);
-            }
-
-            res.json({ message: 'Tarefa aprovada e saldo creditado com sucesso.' });
-        } catch (error) {
-            console.error('Erro ao aprovar tarefa:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-
-    // Recusar tarefa
-    app.put('/api/admin/tasks/:id/reject', authenticateToken, authorizeAdmin, async (req, res) => {
-        const { id } = req.params;
-
-        try {
-            await pool.query(
-                'UPDATE user_tasks SET status = $1, rejected_at = NOW() WHERE id = $2 AND status = $3',
-                ['rejected', id, 'submitted']
-            );
-
-            res.json({ message: 'Tarefa recusada com sucesso.' });
-        } catch (error) {
-            console.error('Erro ao recusar tarefa:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-
-    // Adicionar nova tarefa (Admin)
-    app.post('/api/admin/tasks', authenticateToken, authorizeAdmin, async (req, res) => {
-        const { title, summary, details, link, network, value, max_completions } = req.body;
-
-        try {
-            const result = await pool.query(
-                `INSERT INTO tasks (title, summary, details, link, network, value, max_completions, status) 
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'active') RETURNING *`,
-                [title, summary, details, link, network, value, max_completions]
-            );
-
-            res.status(201).json({ message: 'Tarefa adicionada com sucesso.', task: result.rows[0] });
-        } catch (error) {
-            console.error('Erro ao adicionar tarefa:', error);
-            res.status(500).json({ error: 'Erro interno do servidor.' });
-        }
-    });
-
-    // Obter todos os usuários (Admin) - CORRIGIDA
+    // Obter todos os usuários (Admin)
     app.get('/api/admin/users', authenticateToken, authorizeAdmin, async (req, res) => {
         try {
-            // Converte o campo balance para um número no SQL
             const result = await pool.query(
-                'SELECT id, name, email, whatsapp, CAST(balance AS NUMERIC) as balance, created_at FROM users ORDER BY created_at DESC'
+                'SELECT id, name, email, whatsapp, balance, created_at FROM users ORDER BY created_at DESC'
             );
             res.json(result.rows);
         } catch (error) {
@@ -825,6 +436,15 @@ function startServer() {
                 return res.status(404).json({ error: 'Saque não encontrado.' });
             }
 
+            // Se pago, deduz do saldo do usuário
+            if (status === 'Pago') {
+                const withdrawal = result.rows[0];
+                await pool.query(
+                    'UPDATE users SET balance = balance - $1 WHERE id = $2',
+                    [withdrawal.amount, withdrawal.user_id]
+                );
+            }
+
             res.json({ message: `Saque ${status.toLowerCase()} com sucesso.`, withdrawal: result.rows[0] });
         } catch (error) {
             console.error('Erro ao processar saque:', error);
@@ -832,31 +452,118 @@ function startServer() {
         }
     });
 
-    // --- INÍCIO DA ALTERAÇÃO PRINCIPAL: Rota DELETE para excluir tarefas ---
-    // Excluir uma tarefa (Admin)
-    app.delete('/api/admin/tasks/:id', authenticateToken, authorizeAdmin, async (req, res) => {
-        const { id } = req.params;
+    // --- ROTA DE VERIFICAÇÃO DE DEVICE ID (PARA FRONTEND) ---
+    app.post('/api/check-device', async (req, res) => {
+        const { device_id } = req.body;
+
+        if (!device_id) {
+            return res.status(400).json({ error: 'ID do dispositivo é obrigatório.' });
+        }
 
         try {
-            // Primeiro, verifica se a tarefa existe
-            const taskCheck = await pool.query('SELECT id FROM tasks WHERE id = $1', [id]);
-            if (taskCheck.rows.length === 0) {
-                return res.status(404).json({ error: 'Tarefa não encontrada.' });
-            }
-
-            // Deleta a tarefa. O CASCADE no banco de dados cuidará de deletar as entradas relacionadas em user_tasks.
-            await pool.query('DELETE FROM tasks WHERE id = $1', [id]);
-
-            res.json({ message: 'Tarefa excluída com sucesso.' });
+            const result = await pool.query('SELECT id FROM users WHERE device_id = $1', [device_id]);
+            res.json({ exists: result.rows.length > 0 });
         } catch (error) {
-            console.error('Erro ao excluir tarefa:', error);
+            console.error('Erro ao verificar device ID:', error);
             res.status(500).json({ error: 'Erro interno do servidor.' });
         }
     });
-    // --- FIM DA ALTERAÇÃO PRINCIPAL ---
+    // --- FIM DA ROTA DE VERIFICAÇÃO ---
 
-    // Servir arquivos estáticos
+    // --- ROTA DE VERIFICAÇÃO DE E-MAIL ---
+    app.post('/api/verify-email', async (req, res) => {
+        const { email, token } = req.body;
+
+        if (!email || !token) {
+            return res.status(400).json({ error: 'E-mail e token são obrigatórios.' });
+        }
+
+        try {
+            const result = await pool.query(
+                'SELECT id, verification_token, created_at FROM users WHERE email = $1',
+                [email]
+            );
+
+            if (result.rows.length === 0) {
+                return res.status(404).json({ error: 'Usuário não encontrado.' });
+            }
+
+            const user = result.rows[0];
+
+            if (user.verification_token !== token) {
+                return res.status(400).json({ error: 'Token inválido.' });
+            }
+
+            const tokenAge = new Date() - new Date(user.created_at);
+            const oneHourInMs = 60 * 60 * 1000;
+            if (tokenAge > oneHourInMs) {
+                return res.status(400).json({ error: 'Token expirado. Solicite um novo.' });
+            }
+
+            await pool.query('UPDATE users SET is_verified = TRUE, verification_token = NULL WHERE id = $1', [user.id]);
+
+            res.json({ message: 'E-mail verificado com sucesso! Você já pode fazer login.' });
+        } catch (error) {
+            console.error('Erro na verificação de e-mail:', error);
+            res.status(500).json({ error: 'Erro interno do servidor.' });
+        }
+    });
+    // --- FIM DA ROTA DE VERIFICAÇÃO ---
+
+    // --- ROTA DE REENVIO DE TOKEN ---
+    app.post('/api/resend-token', async (req, res) => {
+        const { email } = req.body;
+
+        if (!email) {
+            return res.status(400).json({ error: 'E-mail é obrigatório.' });
+        }
+
+        try {
+            const result = await pool.query(
+                'SELECT id, is_verified FROM users WHERE email = $1',
+                [email]
+            );
+
+            if (result.rows.length === 0) {
+                return res.status(404).json({ error: 'Usuário não encontrado.' });
+            }
+
+            const user = result.rows[0];
+
+            if (user.is_verified) {
+                return res.status(400).json({ error: 'Este e-mail já foi verificado.' });
+            }
+
+            const newToken = Math.floor(100000 + Math.random() * 900000).toString();
+
+            await pool.query(
+                'UPDATE users SET verification_token = $1, created_at = NOW() WHERE id = $2',
+                [newToken, user.id]
+            );
+
+            await transporter.sendMail({
+                from: process.env.EMAIL_USER,
+                to: email,
+                subject: 'Novo código de verificação - Taskin',
+                html: `<p>Seu novo código de verificação é: <strong>${newToken}</strong></p>`,
+            });
+
+            console.log(`[DEV] Novo código de verificação para ${email}: ${newToken}`);
+            res.json({ message: 'Novo código enviado com sucesso! Verifique sua caixa de entrada.' });
+        } catch (error) {
+            console.error('Erro ao reenviar token:', error);
+            res.status(500).json({ error: 'Erro interno do servidor.' });
+        }
+    });
+    // --- FIM DA ROTA DE REENVIO ---
+
+    // Servir arquivos estáticos (seu frontend)
     app.use(express.static(__dirname));
+
+    // Rota catch-all para SPA (se estiver usando frontend em React/Vue)
+    app.get('*', (req, res) => {
+        res.sendFile(__dirname + '/index.html');
+    });
 
     // Inicia o servidor
     app.listen(PORT, () => {
@@ -865,3 +572,5 @@ function startServer() {
         console.log(`🛠️  Painel Admin: http://localhost:${PORT}/admin.html`);
     });
 }
+
+module.exports = app;
